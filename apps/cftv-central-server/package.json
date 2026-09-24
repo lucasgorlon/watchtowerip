@@ -1,0 +1,22 @@
+{
+  "name": "cftv-central-server",
+  "version": "1.0.0",
+  "description": "Servidor central de monitoramento CFTV multi-cliente (recebe relatorios dos apps locais via VPN)",
+  "main": "dist/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && node dist/index.js",
+    "criar-usuario": "npm run build && node dist/cli/criarUsuario.js",
+    "criar-cliente": "npm run build && node dist/cli/criarCliente.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "lowdb": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.5.1",
+    "typescript": "^5.6.3"
+  }
+}

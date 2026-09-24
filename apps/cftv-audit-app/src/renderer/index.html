@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Auditoria CFTV</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="logo"><img src="assets/logo.png" alt="tu Soluções Inteligentes" class="logo-img" /> Auditoria CFTV</div>
+      <nav>
+        <button class="nav-item active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-item" data-tab="gravadores">Gravadores</button>
+        <button class="nav-item" data-tab="cameras">Câmeras</button>
+        <button class="nav-item" data-tab="config">Configurações</button>
+        <button class="nav-item" data-tab="historico">Histórico</button>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="btn-executar-agora" class="btn btn-primary btn-block">▶ Executar auditoria agora</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <!-- DASHBOARD -->
+      <section id="tab-dashboard" class="tab">
+        <h1>Dashboard</h1>
+        <div id="heartbeat-pausado-aviso" class="hint aviso-pausado hidden">
+          ⏸ Heartbeat automático pausado — auditoria/correção em andamento. Retoma sozinho ao terminar.
+        </div>
+
+        <h2>Conectividade em tempo real <span class="badge">Automático — a cada 15s</span></h2>
+        <div class="cards-resumo" id="cards-conectividade">
+          <div class="card card-ok"><span class="card-numero" id="conect-online">–</span><span>Online</span></div>
+          <div class="card card-offline"><span class="card-numero" id="conect-offline">–</span><span>Offline</span></div>
+          <div class="card card-manual"><span class="card-numero" id="conect-desconhecido">–</span><span>Aguardando 1º ciclo</span></div>
+        </div>
+
+        <h2>Eventos recentes de conectividade</h2>
+        <table class="tabela" id="tabela-eventos-conectividade">
+          <thead><tr><th>Data/Hora</th><th>Câmera</th><th>Evento</th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <h2>Última auditoria completa (manual) <span class="badge">Horário + qualidade de imagem</span></h2>
+        <div class="cards-resumo" id="cards-resumo">
+          <div class="card card-ok"><span class="card-numero" id="resumo-ok">–</span><span>OK</span></div>
+          <div class="card card-atencao"><span class="card-numero" id="resumo-atencao">–</span><span>Atenção</span></div>
+          <div class="card card-offline"><span class="card-numero" id="resumo-offline">–</span><span>Offline</span></div>
+          <div class="card card-manual"><span class="card-numero" id="resumo-manual">–</span><span>Verificar manual</span></div>
+        </div>
+
+        <div class="acoes-horario">
+          <button id="btn-corrigir-horario-desvio" class="btn btn-secondary">🕐 Corrigir horário das câmeras com desvio</button>
+          <button id="btn-corrigir-horario-todas" class="btn btn-secondary">🕐 Corrigir horário de todas as câmeras ativas</button>
+        </div>
+        <p class="hint">
+          Envia o horário obtido via NTP diretamente para cada dispositivo (ONVIF). Canais do
+          mesmo gravador recebem apenas 1 comando, já que compartilham o relógio do NVR.
+        </p>
+        <div id="resultado-correcao-horario"></div>
+
+        <div id="progresso-execucao" class="hidden">
+          <p>Executando auditoria... <span id="progresso-contador">0</span> câmera(s) verificadas.</p>
+        </div>
+
+        <table class="tabela" id="tabela-resultados">
+          <thead>
+            <tr>
+              <th>Câmera</th><th>IP</th><th>Status</th><th>Horário</th><th>Imagem</th><th>Erro</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- GRAVADORES -->
+      <section id="tab-gravadores" class="tab hidden">
+        <h1>Gravadores (NVR)</h1>
+        <p class="hint">
+          Cadastre o gravador inteiro (IP + porta ONVIF + credenciais) e o sistema descobre
+          automaticamente todos os canais/câmeras conectados a ele — sem precisar cadastrar
+          câmera por câmera.
+        </p>
+        <button id="btn-novo-gravador" class="btn btn-primary">+ Adicionar gravador</button>
+        <table class="tabela" id="tabela-gravadores">
+          <thead>
+            <tr>
+              <th>Nome</th><th>IP</th><th>Canais descobertos</th><th>Status ISAPI</th><th>Nível de checagem atual</th><th>Saúde (disco/CPU/rede)</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- CAMERAS -->
+      <section id="tab-cameras" class="tab hidden">
+        <h1>Câmeras</h1>
+        <p class="hint">
+          Câmeras individuais (sem gravador) ficam aqui. Canais descobertos automaticamente a
+          partir de um gravador aparecem com a origem "Gravador" e são removidos junto com ele.
+        </p>
+        <button id="btn-nova-camera" class="btn btn-primary">+ Adicionar câmera individual</button>
+        <table class="tabela" id="tabela-cameras">
+          <thead>
+            <tr>
+              <th>Nome</th><th>IP</th><th>Origem</th><th>Conectividade</th><th>Ativa</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- CONFIGURACOES -->
+      <section id="tab-config" class="tab hidden">
+        <h1>Configurações</h1>
+
+        <div class="painel">
+          <h2>Filtros da auditoria completa (manual)</h2>
+          <div class="form-grid">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-filtro-horario" />
+              Verificar horário
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-filtro-imagem" />
+              Verificar qualidade de imagem (nitidez/brilho)
+            </label>
+          </div>
+          <p class="hint">
+            Desmarcar "qualidade de imagem" acelera bastante a auditoria, já que pula o download
+            e processamento de snapshot — útil quando você só precisa confirmar horário.
+          </p>
+        </div>
+
+        <div class="painel">
+          <h2>Limites de verificação</h2>
+          <div class="form-grid">
+            <label>Servidor NTP
+              <input type="text" id="cfg-ntp" placeholder="a.st1.ntp.br" />
+            </label>
+            <label>Desvio máximo de horário (segundos)
+              <input type="number" id="cfg-desvio" />
+            </label>
+            <label>Limite de nitidez (Laplaciano)
+              <input type="number" id="cfg-nitidez" />
+            </label>
+            <label>Brilho mínimo (0-255)
+              <input type="number" id="cfg-brilho-min" />
+            </label>
+            <label>Brilho máximo (0-255)
+              <input type="number" id="cfg-brilho-max" />
+            </label>
+          </div>
+        </div>
+
+        <div class="painel">
+          <h2>Heartbeat (conectividade automática)</h2>
+          <div class="form-grid">
+            <label>Intervalo rápido — ms (câmeras individuais e gravadores com ISAPI)
+              <input type="number" id="cfg-heartbeat-rapido" step="1000" />
+            </label>
+            <label>Intervalo lento — ms (gravadores no fallback ONVIF-por-canal/TCP)
+              <input type="number" id="cfg-heartbeat-lento" step="1000" />
+            </label>
+          </div>
+          <p class="hint">
+            O sistema escolhe automaticamente qual intervalo usar por gravador, dependendo da
+            camada de checagem que está funcionando nele (veja a aba Gravadores). Câmeras
+            individuais sempre usam o intervalo rápido.
+          </p>
+        </div>
+
+        <div class="painel">
+          <h2>Agendamento</h2>
+          <div class="form-grid">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-agendamento-ativo" />
+              Ativar auditoria automática
+            </label>
+            <label>Expressão cron
+              <input type="text" id="cfg-agendamento-cron" placeholder="0 7 * * 1 (toda segunda às 07:00)" />
+            </label>
+          </div>
+          <p class="hint">Formato cron: minuto hora dia-do-mês mês dia-da-semana. Ex: <code>0 7 * * 1</code> = toda segunda-feira às 07:00.</p>
+        </div>
+
+        <div class="painel">
+          <h2>Telegram</h2>
+          <div class="form-grid">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-telegram-ativo" />
+              Ativar notificações por Telegram
+            </label>
+            <label>Bot Token
+              <input type="password" id="cfg-telegram-token" placeholder="123456:ABC-DEF..." />
+            </label>
+            <label>Chat ID
+              <input type="text" id="cfg-telegram-chatid" placeholder="-1001234567890" />
+            </label>
+          </div>
+          <button id="btn-testar-telegram" class="btn btn-secondary">Enviar mensagem de teste</button>
+          <p class="hint">
+            Crie um bot com o <b>@BotFather</b> no Telegram para obter o token, e use o <b>@userinfobot</b>
+            (ou adicione o bot a um grupo) para descobrir o Chat ID.
+          </p>
+        </div>
+
+        <div class="painel painel-desativado">
+          <h2>WhatsApp <span class="badge">Em breve</span></h2>
+          <p class="hint">Integração planejada — requer aprovação da Meta Cloud API ou um provedor como Twilio.</p>
+        </div>
+
+        <div class="painel painel-desativado">
+          <h2>E-mail <span class="badge">Em breve</span></h2>
+          <p class="hint">Integração planejada via SMTP.</p>
+        </div>
+
+        <div class="painel">
+          <h2>Servidor central (monitoramento multi-cliente)</h2>
+          <div class="form-grid">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-central-ativo" />
+              Enviar resumo periódico para o servidor central
+            </label>
+            <label>URL do servidor central
+              <input type="text" id="cfg-central-url" placeholder="http://10.8.0.1:4000 (dentro da VPN)" />
+            </label>
+            <label>API key deste site
+              <input type="password" id="cfg-central-apikey" placeholder="gerada pelo comando criar-cliente" />
+            </label>
+            <label>Intervalo de envio — ms
+              <input type="number" id="cfg-central-intervalo" step="10000" />
+            </label>
+          </div>
+          <button id="btn-testar-central" class="btn btn-secondary">Enviar teste agora</button>
+          <p class="hint">
+            Envia um resumo de conectividade (e da última auditoria completa) para o servidor
+            central — usado para consolidar o monitoramento de vários clientes num só lugar. A
+            API key é gerada no servidor central com <code>npm run criar-cliente</code>.
+          </p>
+        </div>
+
+        <button id="btn-salvar-config" class="btn btn-primary">Salvar configurações</button>
+        <span id="config-salvo-msg" class="hidden msg-sucesso">✔ Configurações salvas</span>
+      </section>
+
+      <!-- HISTORICO -->
+      <section id="tab-historico" class="tab hidden">
+        <h1>Histórico de execuções</h1>
+        <table class="tabela" id="tabela-historico">
+          <thead>
+            <tr><th>Data/Hora</th><th>Total</th><th>OK</th><th>Atenção</th><th>Offline</th><th>Manual</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal de câmera -->
+  <div id="modal-camera" class="modal hidden">
+    <div class="modal-conteudo">
+      <h2 id="modal-titulo">Nova câmera</h2>
+      <input type="hidden" id="camera-id" />
+      <div class="form-grid">
+        <label>Nome
+          <input type="text" id="camera-nome" placeholder="CAM-01-Entrada" />
+        </label>
+        <label>IP
+          <input type="text" id="camera-ip" placeholder="192.168.1.101" />
+        </label>
+        <label>Porta ONVIF
+          <input type="number" id="camera-porta" value="80" />
+        </label>
+        <label>Marca
+          <input type="text" id="camera-marca" placeholder="Hikvision / Dahua / Uniview / TVT" />
+        </label>
+        <label>Usuário
+          <input type="text" id="camera-usuario" placeholder="admin" />
+        </label>
+        <label>Senha
+          <input type="password" id="camera-senha" />
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="camera-ativa" checked />
+          Câmera ativa (incluir nas auditorias)
+        </label>
+      </div>
+      <div class="modal-acoes">
+        <button id="btn-cancelar-camera" class="btn btn-secondario">Cancelar</button>
+        <button id="btn-salvar-camera" class="btn btn-primary">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de gravador -->
+  <div id="modal-gravador" class="modal hidden">
+    <div class="modal-conteudo">
+      <h2>Adicionar gravador (NVR)</h2>
+      <div class="form-grid">
+        <label>Nome
+          <input type="text" id="gravador-nome" placeholder="NVR Bancada iNVD 3032" />
+        </label>
+        <label>IP
+          <input type="text" id="gravador-ip" placeholder="192.168.1.10" />
+        </label>
+        <label>Porta ONVIF
+          <input type="number" id="gravador-porta" value="80" />
+        </label>
+        <label>Usuário
+          <input type="text" id="gravador-usuario" placeholder="admin" />
+        </label>
+        <label>Senha
+          <input type="password" id="gravador-senha" />
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="checkbox-label">
+          <input type="checkbox" id="gravador-snmp-ativo" />
+          Coletar consumo de rede via SNMP
+        </label>
+        <label>Porta SNMP
+          <input type="number" id="gravador-snmp-porta" value="161" />
+        </label>
+        <label>Community SNMP
+          <input type="text" id="gravador-snmp-community" placeholder="public" value="public" />
+        </label>
+      </div>
+      <p class="hint">
+        Disco e CPU/memória são coletados via ISAPI automaticamente (mesmas credenciais acima).
+        SNMP é opcional e só necessário para consumo de rede — precisa estar habilitado no
+        gravador (Configuração → Rede → SNMP).
+      </p>
+      <p class="hint" id="gravador-status-msg"></p>
+      <div class="modal-acoes">
+        <button id="btn-cancelar-gravador" class="btn btn-secondario">Cancelar</button>
+        <button id="btn-descobrir-canais" class="btn btn-primary">Conectar e descobrir canais</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+{
+  "name": "auditoria-cftv",
+  "version": "1.0.0",
+  "description": "Auditoria automatica de cameras CFTV (ONVIF) com notificacoes via Telegram",
+  "main": "dist/main/index.js",
+  "author": "",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux"
+  },
+  "dependencies": {
+    "digest-fetch": "^3.1.1",
+    "jimp": "^1.6.1",
+    "lowdb": "^7.0.1",
+    "net-snmp": "^3.29.1",
+    "node-cron": "^4.6.0",
+    "ntp-time": "^2.1.1",
+    "onvif": "^0.8.3"
+  },
+  "devDependencies": {
+    "@types/net-snmp": "^3.23.0",
+    "@types/node": "^26.5.1",
+    "@types/node-cron": "^3.0.11",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2",
+    "typescript": "^5.6.3"
+  },
+  "build": {
+    "appId": "com.suaempresa.auditoriacftv",
+    "productName": "Auditoria CFTV",
+    "files": [
+      "dist/**/*",
+      "src/renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

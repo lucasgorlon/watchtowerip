@@ -1,0 +1,18 @@
+{
+  "name": "auditoria-cftv-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sistema de auditoria/monitoramento CFTV multi-cliente — app local (Electron) + servidor central (Node/Express)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build:app": "npm run build --workspace=apps/cftv-audit-app",
+    "build:server": "npm run build --workspace=apps/cftv-central-server",
+    "start:app": "npm run start --workspace=apps/cftv-audit-app",
+    "start:server": "npm run start --workspace=apps/cftv-central-server",
+    "dist:app:win": "npm run dist:win --workspace=apps/cftv-audit-app",
+    "criar-usuario": "npm run criar-usuario --workspace=apps/cftv-central-server --",
+    "criar-cliente": "npm run criar-cliente --workspace=apps/cftv-central-server --"
+  }
+}

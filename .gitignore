@@ -1,0 +1,26 @@
+# Dependências (cada workspace tem a sua)
+node_modules/
+
+# Builds
+dist/
+dist_electron/
+apps/cftv-audit-app/dist_electron/
+
+# Dados locais em tempo de execução — nunca versionar (podem conter
+# credenciais reais de câmeras/gravadores, API keys, senhas com hash)
+apps/cftv-central-server/data/*.json
+!apps/cftv-central-server/data/.gitkeep
+
+# Variáveis de ambiente / segredos
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Sistema operacional / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
