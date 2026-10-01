@@ -11,8 +11,37 @@ export interface CredenciaisOnvif {
   senha: string;
 }
 
-function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
+/**
+ * Envolve uma Promise com um timeout de seguranca -- rejeita com erro claro
+ * se a promise original nao resolver nem rejeitar dentro do prazo.
+ *
+ * Existe porque a biblioteca 'onvif' nem sempre honra o timeout configurado
+ * em TODAS as chamadas -- confirmado com um gravador real (Hikvision
+ * DS-7732NI-K4, credenciais corretas, validadas via curl) em que
+ * `getProfiles` travava indefinidamente, nunca chamando o callback de
+ * sucesso nem de erro. Sem essa rede de seguranca, uma chamada travada
+ * trava o handler de IPC inteiro para sempre -- e o Electron relata
+ * "reply was never sent" (um erro pouco claro) em vez de um erro legivel
+ * de timeout.
+ */
+function comTimeout<T>(promise: Promise<T>, ms: number, mensagem: string): Promise<T> {
   return new Promise((resolve, reject) => {
+    const temporizador = setTimeout(() => reject(new Error(mensagem)), ms);
+    promise.then(
+      (valor) => {
+        clearTimeout(temporizador);
+        resolve(valor);
+      },
+      (erro) => {
+        clearTimeout(temporizador);
+        reject(erro);
+      }
+    );
+  });
+}
+
+function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
+  const promessa = new Promise<Cam>((resolve, reject) => {
     const cam = new Cam(
       {
         hostname: dispositivo.ip,
@@ -27,6 +56,7 @@ function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
       }
     );
   });
+  return comTimeout(promessa, 12000, "Tempo esgotado ao conectar via ONVIF (12s) -- o gravador não respondeu.");
 }
 
 export interface ResultadoHorario {
@@ -41,7 +71,7 @@ export function verificarHorario(
   refUtc: Date,
   limiteSegundos: number
 ): Promise<ResultadoHorario> {
-  return new Promise((resolve, reject) => {
+  const promessa = new Promise<ResultadoHorario>((resolve, reject) => {
     cam.getSystemDateAndTime((err: Error | null, data: any) => {
       if (err) {
         reject(err);
@@ -58,6 +88,7 @@ export function verificarHorario(
       });
     });
   });
+  return comTimeout(promessa, 10000, "Tempo esgotado ao consultar o horário via ONVIF (10s).");
 }
 
 /**
@@ -67,7 +98,7 @@ export function verificarHorario(
  * usa o primeiro perfil disponivel no dispositivo (canal 1).
  */
 export function obterSnapshot(cam: Cam, camera: Camera): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
+  const promessa = new Promise<Buffer>((resolve, reject) => {
     const opcoes = camera.canalToken ? { profileToken: camera.canalToken } : {};
     cam.getSnapshotUri(opcoes, async (err: Error | null, data: any) => {
       if (err) {
@@ -88,6 +119,7 @@ export function obterSnapshot(cam: Cam, camera: Camera): Promise<Buffer> {
       }
     });
   });
+  return comTimeout(promessa, 15000, "Tempo esgotado ao obter o snapshot via ONVIF (15s).");
 }
 
 export interface CanalDescoberto {
@@ -110,7 +142,7 @@ export interface CanalDescoberto {
  * grupo.
  */
 export function descobrirCanais(cam: Cam): Promise<CanalDescoberto[]> {
-  return new Promise((resolve, reject) => {
+  const promessa = new Promise<CanalDescoberto[]>((resolve, reject) => {
     cam.getProfiles((err: Error | null, profiles: any[]) => {
       if (err) {
         reject(err);
@@ -142,6 +174,11 @@ export function descobrirCanais(cam: Cam): Promise<CanalDescoberto[]> {
       resolve(canais);
     });
   });
+  return comTimeout(
+    promessa,
+    25000,
+    "Tempo esgotado ao descobrir canais via ONVIF (25s) -- o gravador parou de responder no meio da descoberta."
+  );
 }
 
 /** Entre os perfis do mesmo canal fisico (main/substream), escolhe o de maior resolucao. */
@@ -174,7 +211,7 @@ function areaDoPerfil(perfil: any): number {
  * cabecalho HTTP chega, sem baixar o arquivo completo.
  */
 export function verificarSnapshotDisponivel(cam: Cam, camera: Camera): Promise<boolean> {
-  return new Promise((resolve) => {
+  const promessa = new Promise<boolean>((resolve) => {
     const opcoes = camera.canalToken ? { profileToken: camera.canalToken } : {};
     cam.getSnapshotUri(opcoes, async (err: Error | null, data: any) => {
       if (err || !data?.uri) {
@@ -199,6 +236,10 @@ export function verificarSnapshotDisponivel(cam: Cam, camera: Camera): Promise<b
       }
     });
   });
+  // Timeout aqui resolve false (canal indisponivel) em vez de rejeitar --
+  // mantem o contrato da funcao (nunca lanca erro) e evita travar o
+  // heartbeat inteiro por causa de UM canal que parou de responder.
+  return comTimeout(promessa, 8000, "timeout").catch(() => false);
 }
 
 /**
@@ -235,7 +276,7 @@ export async function verificarCanaisViaOnvif(
  * -- o app ja fez essa parte e so envia o resultado pronto.
  */
 export function ajustarHorario(cam: Cam, dataHoraUtc: Date): Promise<void> {
-  return new Promise((resolve, reject) => {
+  const promessa = new Promise<void>((resolve, reject) => {
     cam.setSystemDateAndTime(
       { dateTimeType: "Manual", dateTime: dataHoraUtc, daylightSavings: false },
       (err: Error | null) => {
@@ -244,6 +285,7 @@ export function ajustarHorario(cam: Cam, dataHoraUtc: Date): Promise<void> {
       }
     );
   });
+  return comTimeout(promessa, 10000, "Tempo esgotado ao ajustar o horário via ONVIF (10s).");
 }
 
 export { conectar };

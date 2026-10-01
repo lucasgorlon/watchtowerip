@@ -355,6 +355,24 @@ Dahua CGI documentado com a mesma confiabilidade do de disco, e forçar um
 palpite depois de já termos errado duas vezes esse tipo de suposição não
 parecia o caminho certo. Fica como próximo passo, se fizer falta.
 
+## Timeout de segurança em chamadas ONVIF
+
+Todas as chamadas ONVIF baseadas em callback (`onvifClient.ts`) têm um
+timeout de segurança aplicado pelo próprio app, além de qualquer timeout
+que a biblioteca `onvif` já tente aplicar internamente. Isso existe porque,
+em pelo menos um gravador real testado (Hikvision DS-7732NI-K4, credenciais
+corretas, confirmadas via `curl --digest`), a chamada `getProfiles` travou
+indefinidamente — nunca chamou o callback de sucesso nem de erro. Sem um
+timeout próprio, isso trava o processo principal do Electron esperando
+aquela chamada para sempre, e a interface acaba mostrando um erro pouco
+claro (`reply was never sent`) em vez de uma mensagem de timeout legível.
+
+Prazos aplicados: conectar (12s), consultar horário (10s), obter snapshot
+(15s), descobrir canais/perfis (25s — é a chamada mais pesada, pode listar
+muitos canais), checar disponibilidade de canal no heartbeat (8s — aqui o
+timeout vira "indisponível" em vez de erro, pra não travar o ciclo inteiro por causa
+de um canal específico), ajustar horário (10s).
+
 ## Saúde do gravador (disco, CPU/memória, rede)
 
 Coletada automaticamente **a cada envio ao servidor central** (não a cada
