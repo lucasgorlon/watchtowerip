@@ -165,6 +165,8 @@ export interface ResultadoCamera {
   cameraId: string;
   nome: string;
   ip: string;
+  canalNumero: number | null; // numero do canal no gravador (null para camera individual, sem gravador)
+  gravadorId: string | null;
   statusGeral: StatusCamera;
   horarioStatus: string;
   desvioSegundos: number | null;

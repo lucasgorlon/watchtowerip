@@ -37,6 +37,7 @@ function renderizarResultados(resultados) {
       <tr>
         <td>${r.nome}</td>
         <td>${r.ip}</td>
+        <td>${r.canalNumero !== null && r.canalNumero !== undefined ? r.canalNumero : "-"}</td>
         <td>${pillStatus(r.statusGeral)}</td>
         <td>${r.horarioStatus}${r.desvioSegundos !== null ? ` (${r.desvioSegundos}s)` : ""}</td>
         <td>${r.imagemStatus}</td>

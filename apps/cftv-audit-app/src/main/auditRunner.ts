@@ -4,7 +4,7 @@ import { conectar, verificarHorario, obterSnapshot } from "./onvifClient";
 import { analisarImagem } from "./imageAnalysis";
 import { obterHorarioReferencia } from "./ntp";
 import { notificarTodos } from "./notifiers";
-import { adicionarExecucao } from "./store";
+import { adicionarExecucao, buscarGravadorPorId } from "./store";
 
 async function auditarCamera(
   camera: Camera,
@@ -15,6 +15,8 @@ async function auditarCamera(
     cameraId: camera.id,
     nome: camera.nome,
     ip: camera.ip,
+    canalNumero: camera.canalNumero ?? null,
+    gravadorId: camera.gravadorId ?? null,
     statusGeral: "OFFLINE",
     horarioStatus: "NAO_VERIFICADO",
     desvioSegundos: null,
@@ -154,7 +156,19 @@ async function enviarResumoNotificacao(execucao: ExecucaoAuditoria, config: Conf
       ]
         .filter(Boolean)
         .join(" | ");
-      return `• <b>${r.nome}</b> (${r.ip}): ${r.statusGeral} — ${motivos}`;
+
+      // Quando a camera veio de um gravador, o IP sozinho nao ajuda a achar
+      // o canal certo entre dezenas/centenas de outros no mesmo NVR -- por
+      // isso o numero do canal (e o nome do gravador, se disponivel) entram
+      // explicitamente na linha, alem do que o proprio ONVIF chamou a camera
+      // (que em alguns gravadores e so um nome generico tipo "Profilename026").
+      let origem = `(${r.ip})`;
+      if (r.canalNumero !== null) {
+        const gravador = r.gravadorId ? buscarGravadorPorId(r.gravadorId) : null;
+        origem = `(${r.ip} — ${gravador ? gravador.nome : "gravador"}, Canal ${r.canalNumero})`;
+      }
+
+      return `• <b>${r.nome}</b> ${origem}: ${r.statusGeral} — ${motivos}`;
     })
     .join("\n");
 
