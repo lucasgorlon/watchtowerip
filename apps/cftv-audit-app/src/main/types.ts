@@ -22,7 +22,12 @@ export interface Camera {
   origemUltimaChecagem?: "isapi" | "tcp_individual" | "onvif_canal_individual" | "tcp_gravador_fallback";
 }
 
-export type NivelChecagemGravador = "isapi" | "onvif_canal" | "tcp_fallback" | "desconhecido";
+export type NivelChecagemGravador =
+  | "isapi"
+  | "onvif_canal"
+  | "tcp_fallback"
+  | "pausado_autenticacao" // credenciais recusadas N vezes: so TCP (sem login) ate o usuario retomar
+  | "desconhecido";
 
 export interface ConfigSnmp {
   ativo: boolean;
@@ -47,6 +52,17 @@ export interface Gravador {
   snmp: ConfigSnmp; // para coleta de consumo de rede (e fallback de disco)
   ultimaSaude?: SaudeGravador; // cache do ultimo resultado de saude coletado
   protocoloGerenciamento?: ProtocoloGerenciamento; // detectado automaticamente (ISAPI vs Dahua CGI vs nenhum)
+
+  // Protecao contra bloqueio de IP por tentativas de login (Hikvision/Intelbras
+  // bloqueiam o IP de origem apos algumas senhas erradas seguidas).
+  falhasAutenticacaoConsecutivas?: number;
+  pausadoPorAutenticacao?: boolean; // heartbeat parou de tentar login; so TCP ate o usuario retomar
+  motivoPausa?: string;
+  pausadoEm?: string; // ISO
+  isapiRecusouCredenciais?: boolean; // ISAPI deu 401: nao tenta mais ISAPI ate retomar (usuario ONVIF != usuario web e comum na Hikvision)
+
+  // Cache da interface de rede usada na leitura SNMP (descoberta via ifDescr)
+  snmpInterface?: { indice: number; nome: string };
 }
 
 export interface DiscoGravador {
@@ -66,6 +82,7 @@ export interface SaudeGravador {
   memoriaTotalMb: number | null;
   redeEntradaMbps: number | null;
   redeSaidaMbps: number | null;
+  redeInterface?: string; // nome (ifDescr) da interface usada na leitura, ex. "eth0"
   erroDisco?: string;
   erroCpuMemoria?: string;
   erroRede?: string;

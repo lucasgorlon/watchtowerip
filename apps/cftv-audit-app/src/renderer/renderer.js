@@ -175,8 +175,13 @@ const NIVEL_CHECAGEM_LABEL = {
   isapi: "ISAPI (rápido)",
   onvif_canal: "ONVIF por canal (lento)",
   tcp_fallback: "TCP no gravador (lento)",
+  pausado_autenticacao: "🔒 Pausado: credenciais recusadas (só TCP, sem login)",
   desconhecido: "Ainda não verificado",
 };
+
+function escaparAtributo(texto) {
+  return String(texto || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
 
 const ORIGEM_DISCO_LABEL = { isapi: "ISAPI", dahua_cgi: "CGI Dahua", snmp: "SNMP" };
 
@@ -199,9 +204,10 @@ function formatarSaude(saude) {
   }
 
   if (saude.redeEntradaMbps !== null && saude.redeEntradaMbps !== undefined) {
-    partes.push(`📶 ${saude.redeEntradaMbps}↓/${saude.redeSaidaMbps}↑ Mbps`);
+    const iface = saude.redeInterface ? ` [${escaparAtributo(saude.redeInterface)}]` : "";
+    partes.push(`📶 ${saude.redeEntradaMbps}↓/${saude.redeSaidaMbps}↑ Mbps${iface}`);
   } else if (saude.erroRede) {
-    partes.push(`📶 <span class="hint">n/d</span>`);
+    partes.push(`📶 <span class="conect-offline" title="${escaparAtributo(saude.erroRede)}">rede n/d ⓘ</span>`);
   }
 
   const rodape = `<div class="hint">Coletado em ${new Date(saude.coletadoEm).toLocaleTimeString("pt-BR")}</div>`;
@@ -219,6 +225,14 @@ async function carregarGravadores() {
       const nivel = g.nivelChecagemAtual || "desconhecido";
       const intervaloMs = nivel === "isapi" ? config.heartbeat.intervaloRapidoMs : config.heartbeat.intervaloLentoMs;
       const intervaloTexto = nivel === "desconhecido" ? "" : ` (a cada ${(intervaloMs / 1000).toFixed(0)}s)`;
+      const avisoPausa = g.pausadoPorAutenticacao
+        ? `<div class="conect-offline" title="${escaparAtributo(g.motivoPausa)}">Login pausado ⓘ</div>`
+        : g.falhasAutenticacaoConsecutivas > 0
+        ? `<div class="hint">${g.falhasAutenticacaoConsecutivas} falha(s) de login seguida(s)</div>`
+        : "";
+      const botaoRetomar = g.pausadoPorAutenticacao
+        ? `<button class="btn-link" data-retomar-gravador="${g.id}">Retomar (corrigir senha)</button><br/>`
+        : "";
       return `
       <tr data-gravador-id="${g.id}">
         <td>${g.nome}</td>
@@ -231,9 +245,10 @@ async function carregarGravadores() {
             ? `<span class="conect-offline" title="${(g.ultimoErroIsapi || "").replace(/"/g, "&quot;")}">Não suportado (usando fallback) ⓘ</span>`
             : "Ainda não verificado"
         }</td>
-        <td class="celula-nivel-checagem">${NIVEL_CHECAGEM_LABEL[nivel]}${intervaloTexto}</td>
+        <td class="celula-nivel-checagem">${NIVEL_CHECAGEM_LABEL[nivel] || nivel}${intervaloTexto}${avisoPausa}</td>
         <td class="celula-saude">${formatarSaude(g.ultimaSaude)}</td>
         <td>
+          ${botaoRetomar}
           <button class="btn-link" data-testar-saude="${g.id}">Testar saúde agora</button><br/>
           <button class="btn-danger-link" data-remover-gravador="${g.id}">Remover</button>
         </td>
@@ -247,6 +262,19 @@ async function carregarGravadores() {
         await window.cftvApi.gravadores.remover(btn.dataset.removerGravador);
         carregarGravadores();
       }
+    });
+  });
+
+  tbody.querySelectorAll("[data-retomar-gravador]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const g = gravadores.find((x) => x.id === btn.dataset.retomarGravador);
+      if (!g) return;
+      gravadorRetomarId = g.id;
+      document.getElementById("retomar-motivo").textContent = g.motivoPausa || "";
+      document.getElementById("retomar-usuario").value = g.usuario || "";
+      document.getElementById("retomar-senha").value = "";
+      document.getElementById("retomar-status-msg").textContent = "";
+      document.getElementById("modal-retomar").classList.remove("hidden");
     });
   });
 
@@ -268,6 +296,42 @@ async function carregarGravadores() {
       }
     });
   });
+}
+
+let gravadorRetomarId = null;
+
+document.getElementById("btn-cancelar-retomar").addEventListener("click", () => {
+  document.getElementById("modal-retomar").classList.add("hidden");
+});
+
+document.getElementById("btn-confirmar-retomar").addEventListener("click", async (evt) => {
+  const botao = evt.currentTarget;
+  const msg = document.getElementById("retomar-status-msg");
+  const usuario = document.getElementById("retomar-usuario").value.trim();
+  const senha = document.getElementById("retomar-senha").value;
+  if (!gravadorRetomarId) return;
+
+  botao.disabled = true;
+  botao.textContent = "Testando...";
+  msg.textContent = "Testando porta, ONVIF e login (uma única tentativa)...";
+  try {
+    await window.cftvApi.gravadores.retomar(gravadorRetomarId, { usuario: usuario || undefined, senha: senha || undefined });
+    msg.textContent = "✔ Login OK — monitoramento retomado.";
+    setTimeout(() => {
+      document.getElementById("modal-retomar").classList.add("hidden");
+      carregarGravadores();
+    }, 1000);
+  } catch (e) {
+    msg.textContent = "Continua pausado: " + limparErroIpc(e.message);
+  } finally {
+    botao.disabled = false;
+    botao.textContent = "Testar e retomar";
+  }
+});
+
+/** Remove o prefixo "Error invoking remote method '...': Error: " que o Electron coloca em erros de IPC. */
+function limparErroIpc(mensagem) {
+  return String(mensagem || "").replace(/^Error invoking remote method '[^']+': (\w*Error: )?/, "");
 }
 
 window.cftvApi.heartbeat.aoNivelGravadorAtualizar(({ gravadorId }) => {
@@ -310,7 +374,7 @@ document.getElementById("btn-descobrir-canais").addEventListener("click", async 
 
   botao.disabled = true;
   botao.textContent = "Conectando...";
-  msg.textContent = "Conectando ao gravador via ONVIF e listando canais...";
+  msg.textContent = "Testando porta → ONVIF → login → listagem de canais (pode levar até ~1 min)...";
 
   try {
     const resultado = await window.cftvApi.gravadores.adicionarEDescobrirCanais({
@@ -332,7 +396,7 @@ document.getElementById("btn-descobrir-canais").addEventListener("click", async 
       carregarGravadores();
     }, 1200);
   } catch (e) {
-    msg.textContent = "Falha ao conectar: " + e.message;
+    msg.textContent = "Falha ao conectar — " + limparErroIpc(e.message);
   } finally {
     botao.disabled = false;
     botao.textContent = "Conectar e descobrir canais";

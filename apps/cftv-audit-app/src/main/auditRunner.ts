@@ -34,6 +34,15 @@ async function auditarCamera(
     return base;
   }
 
+  // Gravador pausado por credencial recusada: nao tenta login (seria 1
+  // login errado por canal, o que bloqueia o IP no Hikvision/Intelbras).
+  const gravador = camera.gravadorId ? buscarGravadorPorId(camera.gravadorId) : null;
+  if (gravador?.pausadoPorAutenticacao) {
+    base.statusGeral = "VERIFICAR_MANUALMENTE";
+    base.erro = "Gravador pausado: usuário/senha recusados -- corrija as credenciais e clique em Retomar na aba Gravadores.";
+    return base;
+  }
+
   let cam;
   try {
     cam = await conectar(camera);

@@ -5,7 +5,12 @@ import {
   registrarEventoConectividade,
   atualizarSuporteIsapi,
   obterConfiguracoes,
+  registrarFalhaAutenticacaoGravador,
+  zerarFalhasAutenticacaoGravador,
+  marcarIsapiRecusouCredenciais,
+  pausarGravadorPorAutenticacao,
 } from "./store";
+import { ErroAutenticacao, ehErroAutenticacao, mensagemDe } from "./erros";
 import { consultarStatusCanaisIsapi, testarConectividadeTcp } from "./isapiStatus";
 import { verificarCanaisViaOnvif } from "./onvifClient";
 import { notificarTodos } from "./notifiers";
@@ -55,30 +60,46 @@ export async function executarHeartbeatGravador(
     return { resultados: [], nivel: "desconhecido" };
   }
 
-  // 1) e 2): ISAPI em lote, com fallback interno para ISAPI por canal
-  try {
-    const numerosDosCanais = canais
-      .map((c) => c.canalNumero)
-      .filter((n): n is number => n !== undefined);
-    const statusPorCanal = await consultarStatusCanaisIsapi(gravador, numerosDosCanais);
-    await atualizarSuporteIsapi(gravador.id, true);
+  // Pausado por credencial recusada: NENHUM login ate o usuario retomar --
+  // so TCP no gravador, que nao autentica e portanto nao conta tentativa.
+  if (gravador.pausadoPorAutenticacao) {
+    const resultados = await checarSoTcp(gravador, canais);
+    return { resultados, nivel: "pausado_autenticacao" };
+  }
 
-    const resultados = await Promise.all(
-      canais.map((camera) => {
-        const online = camera.canalNumero !== undefined ? statusPorCanal.get(camera.canalNumero) : undefined;
-        return aplicarResultado(camera, online ?? false, "isapi");
-      })
-    );
+  // 1) e 2): ISAPI em lote, com fallback interno para ISAPI por canal.
+  // Pulado se o ISAPI ja recusou a credencial antes (na Hikvision o usuario
+  // ONVIF pode ser diferente do usuario web -- o ONVIF segue funcionando).
+  if (!gravador.isapiRecusouCredenciais) {
+    try {
+      const numerosDosCanais = canais
+        .map((c) => c.canalNumero)
+        .filter((n): n is number => n !== undefined);
+      const statusPorCanal = await consultarStatusCanaisIsapi(gravador, numerosDosCanais);
+      await atualizarSuporteIsapi(gravador.id, true);
+      await zerarFalhasAutenticacaoGravador(gravador.id);
 
-    return { resultados, nivel: "isapi" };
-  } catch (eIsapi) {
-    const mensagemErro = eIsapi instanceof Error ? eIsapi.message : String(eIsapi);
-    await atualizarSuporteIsapi(gravador.id, false, mensagemErro);
+      const resultados = await Promise.all(
+        canais.map((camera) => {
+          const online = camera.canalNumero !== undefined ? statusPorCanal.get(camera.canalNumero) : undefined;
+          return aplicarResultado(camera, online ?? false, "isapi");
+        })
+      );
+
+      return { resultados, nivel: "isapi" };
+    } catch (eIsapi) {
+      if (eIsapi instanceof ErroAutenticacao) {
+        await marcarIsapiRecusouCredenciais(gravador.id, eIsapi.message);
+      } else {
+        await atualizarSuporteIsapi(gravador.id, false, mensagemDe(eIsapi));
+      }
+    }
   }
 
   // 3) ONVIF por canal (mais pesado, mas ainda automatico e com granularidade por canal)
   try {
     const statusPorCanalOnvif = await verificarCanaisViaOnvif(gravador, canais);
+    await zerarFalhasAutenticacaoGravador(gravador.id);
 
     const resultados = await Promise.all(
       canais.map((camera) => {
@@ -89,15 +110,45 @@ export async function executarHeartbeatGravador(
 
     return { resultados, nivel: "onvif_canal" };
   } catch (eOnvif) {
+    if (ehErroAutenticacao(eOnvif)) {
+      const falhas = await registrarFalhaAutenticacaoGravador(gravador.id);
+      if (falhas >= MAX_FALHAS_AUTENTICACAO) {
+        await pausarPorAutenticacao(gravador, falhas, mensagemDe(eOnvif));
+        const resultados = await checarSoTcp(gravador, canais);
+        return { resultados, nivel: "pausado_autenticacao" };
+      }
+    }
+
     // 4) Ultimo recurso: TCP no gravador como um todo (nao distingue canal)
-    const gravadorOnline = await testarConectividadeTcp(gravador.ip, gravador.portaOnvif);
-
-    const resultados = await Promise.all(
-      canais.map((camera) => aplicarResultado(camera, gravadorOnline, "tcp_gravador_fallback"))
-    );
-
+    const resultados = await checarSoTcp(gravador, canais);
     return { resultados, nivel: "tcp_fallback" };
   }
+}
+
+/**
+ * Falhas de autenticacao CONSECUTIVAS (de ciclos diferentes do heartbeat)
+ * ate pausar o gravador. Hikvision bloqueia o IP apos ~5-7 tentativas e
+ * Intelbras apos ~5, entao 3 deixa margem para o usuario ainda conseguir
+ * entrar pela interface web e corrigir a senha.
+ */
+export const MAX_FALHAS_AUTENTICACAO = 3;
+
+async function pausarPorAutenticacao(gravador: Gravador, falhas: number, erro: string) {
+  const motivo =
+    `Credenciais recusadas ${falhas}x seguidas (${erro}). Heartbeat pausado para não bloquear o IP deste PC no gravador; ` +
+    "o status segue sendo checado só por TCP (sem login). Corrija usuário/senha e clique em Retomar.";
+  await pausarGravadorPorAutenticacao(gravador.id, motivo);
+
+  const config = obterConfiguracoes();
+  const mensagem =
+    `🔒 <b>${gravador.nome}</b> (${gravador.ip}): usuário/senha recusados ${falhas}x seguidas. ` +
+    "Monitoramento com login PAUSADO para evitar bloqueio do IP -- corrija as credenciais no app e clique em Retomar.";
+  notificarTodos(config, mensagem).catch((e) => console.error("[heartbeat] Falha ao notificar pausa:", e));
+}
+
+async function checarSoTcp(gravador: Gravador, canais: Camera[]): Promise<ResultadoHeartbeat[]> {
+  const gravadorOnline = await testarConectividadeTcp(gravador.ip, gravador.portaOnvif);
+  return Promise.all(canais.map((camera) => aplicarResultado(camera, gravadorOnline, "tcp_gravador_fallback")));
 }
 
 async function aplicarResultado(

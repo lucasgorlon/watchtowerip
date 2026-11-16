@@ -12,6 +12,8 @@ const api = {
       ipcRenderer.invoke("gravadores:adicionarEDescobrirCanais", dados),
     remover: (id: string) => ipcRenderer.invoke("gravadores:remover", id),
     testarSaude: (id: string) => ipcRenderer.invoke("gravadores:testarSaude", id),
+    retomar: (id: string, novasCredenciais?: { usuario?: string; senha?: string }) =>
+      ipcRenderer.invoke("gravadores:retomar", id, novasCredenciais),
   },
   heartbeat: {
     listarEventos: (limite?: number) => ipcRenderer.invoke("heartbeat:eventos", limite),

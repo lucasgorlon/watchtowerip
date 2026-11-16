@@ -2,6 +2,8 @@ import { Cam } from "onvif";
 // @ts-ignore - digest-fetch nao possui tipos oficiais
 import DigestFetch from "digest-fetch";
 import { Camera } from "./types";
+import { testarConectividadeTcp } from "./isapiStatus";
+import { ehErroAutenticacao, mensagemDe } from "./erros";
 
 /** Credenciais ONVIF minimas, compativeis tanto com Camera quanto com Gravador. */
 export interface CredenciaisOnvif {
@@ -40,7 +42,25 @@ function comTimeout<T>(promise: Promise<T>, ms: number, mensagem: string): Promi
   });
 }
 
-function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
+/** Erro de timeout do comTimeout -- usado para distinguir "demorou" de "recusou" no diagnostico. */
+class ErroTempoEsgotado extends Error {
+  constructor(mensagem: string) {
+    super(mensagem);
+    this.name = "ErroTempoEsgotado";
+  }
+}
+
+export interface OpcoesConexao {
+  /** Tempo maximo total da conexao (handshake ONVIF). Padrao 12s -- curto, pensado para o heartbeat. */
+  timeoutMs?: number;
+}
+
+function conectar(dispositivo: CredenciaisOnvif, opcoes: OpcoesConexao = {}): Promise<Cam> {
+  const timeoutTotalMs = opcoes.timeoutMs ?? 12000;
+  // timeout por requisicao SOAP da biblioteca: um pouco menor que o total,
+  // para que o erro "natural" da lib chegue antes do nosso comTimeout.
+  const timeoutRequisicaoMs = Math.max(4000, timeoutTotalMs - 4000);
+
   const promessa = new Promise<Cam>((resolve, reject) => {
     const cam = new Cam(
       {
@@ -48,7 +68,7 @@ function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
         port: dispositivo.portaOnvif,
         username: dispositivo.usuario,
         password: dispositivo.senha,
-        timeout: 8000,
+        timeout: timeoutRequisicaoMs,
       },
       (err: Error | null) => {
         if (err) reject(err);
@@ -56,7 +76,13 @@ function conectar(dispositivo: CredenciaisOnvif): Promise<Cam> {
       }
     );
   });
-  return comTimeout(promessa, 12000, "Tempo esgotado ao conectar via ONVIF (12s) -- o gravador não respondeu.");
+  const segundos = Math.round(timeoutTotalMs / 1000);
+  return comTimeout(promessa, timeoutTotalMs, `Tempo esgotado ao conectar via ONVIF (${segundos}s) -- o gravador não respondeu.`).catch(
+    (e) => {
+      if (e instanceof Error && e.message.startsWith("Tempo esgotado ao conectar")) throw new ErroTempoEsgotado(e.message);
+      throw e;
+    }
+  );
 }
 
 export interface ResultadoHorario {
@@ -141,7 +167,7 @@ export interface CanalDescoberto {
  * mantemos apenas o perfil de maior resolucao (o stream principal) de cada
  * grupo.
  */
-export function descobrirCanais(cam: Cam): Promise<CanalDescoberto[]> {
+export function descobrirCanais(cam: Cam, timeoutMs = 25000): Promise<CanalDescoberto[]> {
   const promessa = new Promise<CanalDescoberto[]>((resolve, reject) => {
     cam.getProfiles((err: Error | null, profiles: any[]) => {
       if (err) {
@@ -174,11 +200,192 @@ export function descobrirCanais(cam: Cam): Promise<CanalDescoberto[]> {
       resolve(canais);
     });
   });
+  const segundos = Math.round(timeoutMs / 1000);
   return comTimeout(
     promessa,
-    25000,
-    "Tempo esgotado ao descobrir canais via ONVIF (25s) -- o gravador parou de responder no meio da descoberta."
+    timeoutMs,
+    `Tempo esgotado ao descobrir canais via ONVIF (${segundos}s) -- o gravador parou de responder no meio da descoberta.`
+  ).catch((e) => {
+    if (e instanceof Error && e.message.startsWith("Tempo esgotado ao descobrir")) throw new ErroTempoEsgotado(e.message);
+    throw e;
+  });
+}
+
+// ---------------------------------------------------------------------
+// Diagnostico em etapas (usado na descoberta de canais e ao retomar um
+// gravador pausado). Em vez de um "Tempo esgotado (12s)" generico, cada
+// etapa isola uma causa diferente:
+//   1) TCP na porta ONVIF          -> porta fechada / sem rota (VPN, firewall)
+//   2) GetSystemDateAndTime sem auth -> servico ONVIF desligado ou IP bloqueado
+//   3) conexao com credenciais     -> usuario/senha recusados (+ desvio de relogio)
+//   4) GetProfiles                 -> gravador lento para listar perfis
+// ---------------------------------------------------------------------
+
+/** Diferenca de relogio PC x gravador acima disso invalida o WS-Security (UsernameToken) em varios firmwares. */
+const LIMITE_DESVIO_RELOGIO_S = 5 * 60;
+
+export class ErroDiagnosticoOnvif extends Error {
+  constructor(
+    public readonly etapa: 1 | 2 | 3 | 4,
+    public readonly tipo: "porta_fechada" | "onvif_sem_resposta" | "autenticacao_recusada" | "login_lento" | "erro_login" | "perfis_lentos" | "erro_perfis",
+    mensagem: string
+  ) {
+    super(mensagem);
+    this.name = "ErroDiagnosticoOnvif";
+  }
+}
+
+/**
+ * GetSystemDateAndTime e uma das poucas operacoes que o padrao ONVIF exige
+ * que funcionem SEM autenticacao -- por isso e o teste ideal para separar
+ * "ONVIF fora do ar" de "credencial errada". Feito com fetch puro (sem a lib
+ * onvif) para nao enviar nenhuma tentativa de login.
+ */
+export async function consultarHorarioSemAutenticacao(ip: string, porta: number, timeoutMs = 10000): Promise<Date> {
+  const corpo =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">' +
+    '<s:Body><GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body>' +
+    "</s:Envelope>";
+
+  const controle = new AbortController();
+  const temporizador = setTimeout(() => controle.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`http://${ip}:${porta}/onvif/device_service`, {
+      method: "POST",
+      headers: { "Content-Type": 'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime"' },
+      body: corpo,
+      signal: controle.signal,
+    });
+    const xml = await resp.text();
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = extrairUtcDateTime(xml);
+    if (!data) throw new Error("resposta sem UTCDateTime reconhecível");
+    return data;
+  } catch (e: any) {
+    if (e?.name === "AbortError") throw new Error(`sem resposta em ${Math.round(timeoutMs / 1000)}s`);
+    throw e;
+  } finally {
+    clearTimeout(temporizador);
+  }
+}
+
+function extrairUtcDateTime(xml: string): Date | null {
+  const bloco = xml.match(/<(?:\w+:)?UTCDateTime>([\s\S]*?)<\/(?:\w+:)?UTCDateTime>/)?.[1];
+  if (!bloco) return null;
+  const campo = (nome: string) => {
+    const m = bloco.match(new RegExp(`<(?:\\w+:)?${nome}>(\\d+)</(?:\\w+:)?${nome}>`));
+    return m ? Number(m[1]) : NaN;
+  };
+  const [ano, mes, dia, hora, minuto, segundo] = ["Year", "Month", "Day", "Hour", "Minute", "Second"].map(campo);
+  if ([ano, mes, dia, hora, minuto, segundo].some((n) => Number.isNaN(n))) return null;
+  return new Date(Date.UTC(ano, mes - 1, dia, hora, minuto, segundo));
+}
+
+function descreverDesvio(horarioGravador: Date | null): string {
+  if (!horarioGravador) return "";
+  const desvioS = Math.round((horarioGravador.getTime() - Date.now()) / 1000);
+  if (Math.abs(desvioS) <= LIMITE_DESVIO_RELOGIO_S) return "";
+  const minutos = Math.round(Math.abs(desvioS) / 60);
+  const sentido = desvioS > 0 ? "adiantado" : "atrasado";
+  return (
+    ` Atenção: o relógio do gravador está ${minutos} min ${sentido} em relação a este PC` +
+    ` (gravador: ${horarioGravador.toISOString()} UTC) -- diferenças acima de 5 min fazem alguns firmwares recusarem o login ONVIF mesmo com a senha certa.`
   );
+}
+
+export interface OpcoesDiagnostico {
+  timeoutTcpMs?: number;
+  timeoutSemAuthMs?: number;
+  timeoutLoginMs?: number;
+}
+
+/**
+ * Etapas 1 a 3: devolve a conexao ONVIF autenticada ou lanca
+ * ErroDiagnosticoOnvif com a causa provavel. Faz no maximo UMA tentativa
+ * de login (nao contribui para bloqueio de IP por repeticao).
+ */
+export async function conectarComDiagnostico(
+  dispositivo: CredenciaisOnvif,
+  opcoes: OpcoesDiagnostico = {}
+): Promise<{ cam: Cam; horarioGravador: Date | null }> {
+  const { ip, portaOnvif } = dispositivo;
+  const timeoutTcpMs = opcoes.timeoutTcpMs ?? 5000;
+  const timeoutSemAuthMs = opcoes.timeoutSemAuthMs ?? 15000;
+  const timeoutLoginMs = opcoes.timeoutLoginMs ?? 40000;
+
+  // 1) TCP
+  const portaAberta = await testarConectividadeTcp(ip, portaOnvif, timeoutTcpMs);
+  if (!portaAberta) {
+    throw new ErroDiagnosticoOnvif(
+      1,
+      "porta_fechada",
+      `Etapa 1/4 (TCP): a porta ${portaOnvif} de ${ip} está fechada ou sem rota -- confira o IP/porta, se a VPN está conectada e se há firewall no caminho.`
+    );
+  }
+
+  // 2) ONVIF sem autenticacao
+  let horarioGravador: Date | null = null;
+  try {
+    horarioGravador = await consultarHorarioSemAutenticacao(ip, portaOnvif, timeoutSemAuthMs);
+  } catch (e) {
+    throw new ErroDiagnosticoOnvif(
+      2,
+      "onvif_sem_resposta",
+      `Etapa 2/4 (ONVIF sem login): a porta ${portaOnvif} está aberta, mas o serviço ONVIF não respondeu (${mensagemDe(e)}). ` +
+        `Provável: ONVIF desativado no gravador, porta errada (ONVIF costuma ser a porta HTTP, ex. 80) ou IP deste PC bloqueado por tentativas de login inválidas -- aguarde o desbloqueio (normalmente 30 min) ou reinicie o gravador.`
+    );
+  }
+
+  // 3) Login
+  try {
+    const cam = await conectar(dispositivo, { timeoutMs: timeoutLoginMs });
+    return { cam, horarioGravador };
+  } catch (e) {
+    const desvio = descreverDesvio(horarioGravador);
+    if (ehErroAutenticacao(e)) {
+      throw new ErroDiagnosticoOnvif(
+        3,
+        "autenticacao_recusada",
+        `Etapa 3/4 (login ONVIF): o gravador recusou usuário/senha. Na Hikvision o usuário ONVIF é cadastrado à parte (Configuração > Rede > Avançado > Protocolo de integração).` +
+          desvio +
+          " Evite repetir com a senha errada: o gravador bloqueia o IP após algumas tentativas."
+      );
+    }
+    if (e instanceof ErroTempoEsgotado) {
+      throw new ErroDiagnosticoOnvif(
+        3,
+        "login_lento",
+        `Etapa 3/4 (login ONVIF): o ONVIF responde sem login, mas a conexão autenticada não terminou em ${Math.round(timeoutLoginMs / 1000)}s.` +
+          (desvio || " Pode ser lentidão na VPN ou o gravador sobrecarregado.")
+      );
+    }
+    throw new ErroDiagnosticoOnvif(3, "erro_login", `Etapa 3/4 (login ONVIF): ${mensagemDe(e)}.${desvio}`);
+  }
+}
+
+/** Etapas 1 a 4: conecta com diagnostico e lista os canais (timeouts longos, so para a descoberta). */
+export async function descobrirCanaisComDiagnostico(
+  dispositivo: CredenciaisOnvif,
+  opcoes: OpcoesDiagnostico & { timeoutPerfisMs?: number } = {}
+): Promise<CanalDescoberto[]> {
+  const { cam } = await conectarComDiagnostico(dispositivo, opcoes);
+  const timeoutPerfisMs = opcoes.timeoutPerfisMs ?? 45000;
+  try {
+    return await descobrirCanais(cam, timeoutPerfisMs);
+  } catch (e) {
+    if (e instanceof ErroTempoEsgotado) {
+      throw new ErroDiagnosticoOnvif(
+        4,
+        "perfis_lentos",
+        `Etapa 4/4 (listar perfis): login OK, mas o gravador demorou mais de ${Math.round(timeoutPerfisMs / 1000)}s para listar os perfis/canais. ` +
+          "Gravadores com muitos canais ou CPU alta podem demorar -- tente novamente em alguns minutos."
+      );
+    }
+    throw new ErroDiagnosticoOnvif(4, "erro_perfis", `Etapa 4/4 (listar perfis): ${mensagemDe(e)}`);
+  }
 }
 
 /** Entre os perfis do mesmo canal fisico (main/substream), escolhe o de maior resolucao. */

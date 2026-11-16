@@ -2,6 +2,7 @@
 import DigestFetch from "digest-fetch";
 import net from "net";
 import { Gravador } from "./types";
+import { ErroAutenticacao } from "./erros";
 
 /**
  * Consulta o status (online/offline) dos canais de um gravador via ISAPI
@@ -24,15 +25,22 @@ export async function consultarStatusCanaisIsapi(
   try {
     return await consultarStatusEmLote(gravador);
   } catch (erroLote) {
+    // Credencial recusada: NAO cai para a consulta por canal -- seriam mais
+    // N logins errados seguidos, o que bloqueia o IP no Hikvision/Intelbras.
+    if (erroLote instanceof ErroAutenticacao) throw erroLote;
     return await consultarStatusPorCanal(gravador, canais);
   }
 }
+
+const MENSAGEM_ISAPI_401 =
+  "ISAPI recusou usuário/senha (HTTP 401) -- ISAPI suspenso para este gravador para não bloquear o IP por tentativas de login.";
 
 async function consultarStatusEmLote(gravador: Gravador): Promise<Map<number, boolean>> {
   const client = new DigestFetch(gravador.usuario, gravador.senha);
   const url = `http://${gravador.ip}:${gravador.portaOnvif}/ISAPI/ContentMgmt/InputProxy/channels/status`;
 
   const resp = await client.fetch(url, { method: "GET" });
+  if (resp.status === 401) throw new ErroAutenticacao(MENSAGEM_ISAPI_401);
   if (!resp.ok) {
     throw new Error(`ISAPI (lote) respondeu HTTP ${resp.status}`);
   }
@@ -54,27 +62,44 @@ async function consultarStatusPorCanal(
   const resultado = new Map<number, boolean>();
   const client = new DigestFetch(gravador.usuario, gravador.senha);
   const fila = [...canais];
+  let recusouCredenciais = false;
 
-  async function worker() {
-    while (fila.length > 0) {
-      const canal = fila.shift();
-      if (canal === undefined) break;
-      try {
-        const url = `http://${gravador.ip}:${gravador.portaOnvif}/ISAPI/ContentMgmt/InputProxy/channels/${canal}/status`;
-        const resp = await client.fetch(url, { method: "GET" });
-        if (!resp.ok) continue; // deixa esse canal de fora do Map (tratado como offline por quem chama)
-        const xml = await resp.text();
-        const mapaUnico = extrairStatusDoXml(xml);
-        // resposta de canal unico normalmente vem sem <id>, ou com o proprio id -- usa o numero do canal como chave garantida
-        const online = mapaUnico.size > 0 ? Array.from(mapaUnico.values())[0] : false;
-        resultado.set(canal, online);
-      } catch {
-        // canal individual falhou -- fica de fora do Map, tratado como offline
+  async function consultarCanal(canal: number) {
+    try {
+      const url = `http://${gravador.ip}:${gravador.portaOnvif}/ISAPI/ContentMgmt/InputProxy/channels/${canal}/status`;
+      const resp = await client.fetch(url, { method: "GET" });
+      if (resp.status === 401) {
+        recusouCredenciais = true; // para todos os workers na hora
+        return;
       }
+      if (!resp.ok) return; // deixa esse canal de fora do Map (tratado como offline por quem chama)
+      const xml = await resp.text();
+      const mapaUnico = extrairStatusDoXml(xml);
+      // resposta de canal unico normalmente vem sem <id>, ou com o proprio id -- usa o numero do canal como chave garantida
+      const online = mapaUnico.size > 0 ? Array.from(mapaUnico.values())[0] : false;
+      resultado.set(canal, online);
+    } catch {
+      // canal individual falhou -- fica de fora do Map, tratado como offline
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(concorrencia, canais.length || 1) }, () => worker()));
+  async function worker() {
+    while (fila.length > 0 && !recusouCredenciais) {
+      const canal = fila.shift();
+      if (canal === undefined) break;
+      await consultarCanal(canal);
+    }
+  }
+
+  // O primeiro canal vai sozinho: se a senha estiver errada, so 1 login
+  // falho e enviado (em vez de `concorrencia` logins simultaneos).
+  const primeiro = fila.shift();
+  if (primeiro !== undefined) await consultarCanal(primeiro);
+  if (!recusouCredenciais) {
+    await Promise.all(Array.from({ length: Math.min(concorrencia, fila.length || 1) }, () => worker()));
+  }
+
+  if (recusouCredenciais) throw new ErroAutenticacao(MENSAGEM_ISAPI_401);
 
   if (resultado.size === 0) {
     throw new Error("Nenhum canal respondeu ao ISAPI individualmente -- endpoint provavelmente nao suportado por este gravador");

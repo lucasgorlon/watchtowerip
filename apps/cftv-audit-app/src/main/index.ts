@@ -16,6 +16,7 @@ import {
   salvarConfiguracoes,
   listarHistorico,
   listarEventosConectividade,
+  retomarGravador,
 } from "./store";
 import { executarAuditoria } from "./auditRunner";
 import { corrigirHorarioEmLote } from "./timeSyncRunner";
@@ -24,7 +25,7 @@ import { definirAuditoriaEmAndamento, isAuditoriaEmAndamento } from "./estadoAud
 import { executarHeartbeatIndividuais, executarHeartbeatGravador } from "./heartbeatRunner";
 import { reconfigurarAgendamento } from "./scheduler";
 import { TelegramNotifier } from "./notifiers";
-import { conectar, descobrirCanais } from "./onvifClient";
+import { conectarComDiagnostico, descobrirCanaisComDiagnostico } from "./onvifClient";
 import { coletarSaudeGravador } from "./saudeGravador";
 import { Camera, Gravador } from "./types";
 
@@ -104,7 +105,15 @@ function iniciarEnvioServidorCentral() {
 // ajusta sozinho conforme a camada de checagem usada naquele gravador:
 // rapido para ISAPI, lento para o fallback ONVIF-por-canal / TCP-gravador.
 // ---------------------------------------------------------------------
-async function cicloGravador(gravador: Gravador) {
+async function cicloGravador(gravadorInicial: Gravador) {
+  // Rele do banco a cada ciclo: pausa por autenticacao, credenciais novas e
+  // flags de ISAPI mudam entre ciclos. Se o gravador foi removido, para.
+  const gravador = buscarGravadorPorId(gravadorInicial.id);
+  if (!gravador || !gravador.ativo) {
+    temporizadoresGravadores.delete(gravadorInicial.id);
+    return;
+  }
+
   if (isAuditoriaEmAndamento()) {
     // Nao faz trabalho agora, mas reagenda uma nova checagem em breve --
     // assim que a auditoria terminar, o heartbeat retoma sozinho.
@@ -204,14 +213,17 @@ ipcMain.handle("gravadores:listar", () => listarGravadores());
 ipcMain.handle(
   "gravadores:adicionarEDescobrirCanais",
   async (_evt, dados: Omit<Gravador, "id" | "totalCanaisDescobertos">) => {
-    const cam = await conectar({
-      ip: dados.ip,
-      portaOnvif: dados.portaOnvif,
-      usuario: dados.usuario,
-      senha: dados.senha,
-    });
-
-    const canais = await descobrirCanais(cam);
+    // Timeouts longos SO aqui (descoberta e uma acao manual e unica); o
+    // heartbeat continua com os timeouts curtos padrao do conectar().
+    const canais = await descobrirCanaisComDiagnostico(
+      {
+        ip: dados.ip,
+        portaOnvif: dados.portaOnvif,
+        usuario: dados.usuario,
+        senha: dados.senha,
+      },
+      { timeoutTcpMs: 5000, timeoutSemAuthMs: 15000, timeoutLoginMs: 40000, timeoutPerfisMs: 45000 }
+    );
     if (canais.length === 0) {
       throw new Error("O gravador respondeu, mas nenhum canal/perfil foi encontrado via ONVIF.");
     }
@@ -247,6 +259,34 @@ ipcMain.handle("gravadores:remover", async (_evt, id: string) => {
   await removerGravador(id);
   return true;
 });
+
+/**
+ * Retira a pausa de autenticacao. Antes de liberar o heartbeat, faz UMA
+ * conexao com diagnostico (no maximo 1 tentativa de login) usando as
+ * credenciais novas, se informadas; se ainda falhar, o gravador continua
+ * pausado e o erro detalhado volta para a tela.
+ */
+ipcMain.handle(
+  "gravadores:retomar",
+  async (_evt, id: string, novasCredenciais?: { usuario?: string; senha?: string }) => {
+    const gravador = buscarGravadorPorId(id);
+    if (!gravador) {
+      throw new Error("Gravador não encontrado.");
+    }
+    await conectarComDiagnostico(
+      {
+        ip: gravador.ip,
+        portaOnvif: gravador.portaOnvif,
+        usuario: novasCredenciais?.usuario || gravador.usuario,
+        senha: novasCredenciais?.senha || gravador.senha,
+      },
+      { timeoutTcpMs: 5000, timeoutSemAuthMs: 15000, timeoutLoginMs: 40000 }
+    );
+    const atualizado = await retomarGravador(id, novasCredenciais);
+    if (atualizado) iniciarHeartbeatGravador(atualizado);
+    return atualizado;
+  }
+);
 
 ipcMain.handle("gravadores:testarSaude", async (_evt, id: string) => {
   const gravador = buscarGravadorPorId(id);

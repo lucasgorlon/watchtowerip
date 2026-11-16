@@ -210,6 +210,89 @@ export async function atualizarSuporteIsapi(gravadorId: string, suporta: boolean
   }
 }
 
+/** Soma 1 falha de autenticacao e devolve o total consecutivo atual. */
+export async function registrarFalhaAutenticacaoGravador(gravadorId: string): Promise<number> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (!gravador) return 0;
+  gravador.falhasAutenticacaoConsecutivas = (gravador.falhasAutenticacaoConsecutivas ?? 0) + 1;
+  await db.write();
+  return gravador.falhasAutenticacaoConsecutivas;
+}
+
+/** Login funcionou: zera o contador de falhas (so grava se havia algo a zerar). */
+export async function zerarFalhasAutenticacaoGravador(gravadorId: string): Promise<void> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (gravador && (gravador.falhasAutenticacaoConsecutivas ?? 0) > 0) {
+    gravador.falhasAutenticacaoConsecutivas = 0;
+    await db.write();
+  }
+}
+
+export async function marcarIsapiRecusouCredenciais(gravadorId: string, mensagem: string): Promise<void> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (gravador) {
+    gravador.isapiRecusouCredenciais = true;
+    gravador.suportaIsapi = false;
+    gravador.ultimoErroIsapi = mensagem;
+    await db.write();
+  }
+}
+
+export async function pausarGravadorPorAutenticacao(gravadorId: string, motivo: string): Promise<void> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (gravador) {
+    gravador.pausadoPorAutenticacao = true;
+    gravador.motivoPausa = motivo;
+    gravador.pausadoEm = new Date().toISOString();
+    gravador.nivelChecagemAtual = "pausado_autenticacao";
+    await db.write();
+  }
+}
+
+/**
+ * Retira a pausa de autenticacao e, opcionalmente, troca as credenciais --
+ * tanto no gravador quanto em todos os canais (cameras) dele, que guardam
+ * uma copia de usuario/senha.
+ */
+export async function retomarGravador(
+  gravadorId: string,
+  novasCredenciais?: { usuario?: string; senha?: string }
+): Promise<Gravador | null> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (!gravador) return null;
+
+  if (novasCredenciais?.usuario) gravador.usuario = novasCredenciais.usuario;
+  if (novasCredenciais?.senha) gravador.senha = novasCredenciais.senha;
+  db.data!.cameras
+    .filter((c) => c.gravadorId === gravadorId)
+    .forEach((c) => {
+      c.usuario = gravador.usuario;
+      c.senha = gravador.senha;
+    });
+
+  gravador.pausadoPorAutenticacao = false;
+  gravador.motivoPausa = undefined;
+  gravador.pausadoEm = undefined;
+  gravador.falhasAutenticacaoConsecutivas = 0;
+  gravador.isapiRecusouCredenciais = false;
+  gravador.suportaIsapi = undefined;
+  gravador.ultimoErroIsapi = undefined;
+  gravador.nivelChecagemAtual = "desconhecido";
+  await db.write();
+  return gravador;
+}
+
+export async function atualizarInterfaceSnmpGravador(
+  gravadorId: string,
+  iface: Gravador["snmpInterface"]
+): Promise<void> {
+  const gravador = db.data!.gravadores.find((g) => g.id === gravadorId);
+  if (gravador) {
+    gravador.snmpInterface = iface;
+    await db.write();
+  }
+}
+
 export async function atualizarNivelChecagemGravador(
   gravadorId: string,
   nivel: Gravador["nivelChecagemAtual"]

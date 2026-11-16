@@ -1,6 +1,7 @@
 import { Camera } from "./types";
 import { conectar, ajustarHorario } from "./onvifClient";
 import { obterHorarioReferencia } from "./ntp";
+import { buscarGravadorPorId } from "./store";
 
 export interface ResultadoCorrecaoHorario {
   cameraId: string;
@@ -42,6 +43,13 @@ export async function corrigirHorarioEmLote(
       const representante = fila.shift();
       if (!representante) break;
       const grupo = grupos.get(chaveDedupDispositivo(representante))!;
+
+      const gravador = representante.gravadorId ? buscarGravadorPorId(representante.gravadorId) : null;
+      if (gravador?.pausadoPorAutenticacao) {
+        const erro = "Gravador pausado por credenciais recusadas -- corrija e clique em Retomar antes de ajustar o horário.";
+        grupo.forEach((c) => resultados.push({ cameraId: c.id, nome: c.nome, sucesso: false, erro }));
+        continue;
+      }
 
       try {
         const cam = await conectar(representante);

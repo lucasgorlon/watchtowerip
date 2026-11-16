@@ -3,7 +3,7 @@ import DigestFetch from "digest-fetch";
 import * as snmp from "net-snmp";
 import { DiscoGravador, Gravador, SaudeGravador } from "./types";
 import { detectarProtocoloGerenciamento, obterStatusDiscosDahua } from "./protocoloGravador";
-import { atualizarProtocoloGravador } from "./store";
+import { atualizarProtocoloGravador, atualizarInterfaceSnmpGravador } from "./store";
 
 // ---------------------------------------------------------------------
 // Disco (HDD) via ISAPI -- /ISAPI/ContentMgmt/Storage
@@ -102,15 +102,118 @@ const OID_IF_IN_OCTETS = "1.3.6.1.2.1.2.2.1.10"; // 32 bits, Counter32
 const OID_IF_OUT_OCTETS = "1.3.6.1.2.1.2.2.1.16";
 const OID_IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"; // 64 bits, Counter64
 const OID_IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10";
-const INDICE_INTERFACE_PADRAO = 1; // interface de rede principal, na maioria dos gravadores
+const OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2";
+const OID_IF_TYPE = "1.3.6.1.2.1.2.2.1.3";
+const OID_IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8";
+const IF_TYPE_SOFTWARE_LOOPBACK = 24;
+const IF_OPER_STATUS_UP = 1;
+
+const TIMEOUT_SNMP_MS = 4000;
+const TENTATIVAS_SNMP = 1;
 
 function criarSessaoSnmp(gravador: Gravador): snmp.Session {
   return snmp.createSession(gravador.ip, gravador.snmp.community, {
     port: gravador.snmp.porta,
-    timeout: 4000,
-    retries: 1,
+    timeout: TIMEOUT_SNMP_MS,
+    retries: TENTATIVAS_SNMP,
     version: snmp.Version2c,
   });
+}
+
+/**
+ * Traduz o erro cru do net-snmp ("Request timed out") em algo acionavel.
+ * No SNMP v2c, comunidade errada NAO gera erro -- o agente simplesmente
+ * ignora o pacote -- entao timeout cobre as tres causas abaixo.
+ */
+function traduzirErroSnmp(erro: unknown, gravador: Gravador): Error {
+  const e = erro as any;
+  const ehTimeout = e?.name === "RequestTimedOutError" || /timed? ?out/i.test(String(e?.message ?? e));
+  if (ehTimeout) {
+    const segundos = Math.round((TIMEOUT_SNMP_MS * (TENTATIVAS_SNMP + 1)) / 1000);
+    return new Error(
+      `SNMP não respondeu em ${segundos}s (${gravador.ip}:${gravador.snmp.porta}/UDP). Causas prováveis: ` +
+        `SNMP desligado no gravador, comunidade "${gravador.snmp.community}" incorreta (o gravador ignora em silêncio) ` +
+        `ou UDP ${gravador.snmp.porta} bloqueado na VPN/firewall.`
+    );
+  }
+  return erro instanceof Error ? erro : new Error(String(erro));
+}
+
+interface InterfaceRede {
+  indice: number;
+  nome: string;
+  tipo: number | null;
+  up: boolean;
+  trafegoTotal: bigint;
+}
+
+function ehLoopback(iface: Pick<InterfaceRede, "nome" | "tipo">): boolean {
+  return iface.tipo === IF_TYPE_SOFTWARE_LOOPBACK || /^lo\d*$|loopback/i.test(iface.nome.trim());
+}
+
+/**
+ * Descobre qual interface (ifIndex) e a rede "de verdade" do gravador.
+ * O indice 1 fixo nao serve: em muitos NVRs (Linux embarcado) o indice 1
+ * e o loopback "lo", e a leitura dava sempre ~0 Mbps.
+ *
+ * Criterio: descarta loopback; prefere interface UP; entre elas, a de maior
+ * trafego acumulado (ifInOctets + ifOutOctets); em empate, nomes tipo
+ * eth0, eth1, enp... ou bond0 primeiro.
+ */
+async function descobrirInterfaceRede(sessao: snmp.Session): Promise<{ indice: number; nome: string }> {
+  const [descrs, tipos, status, entradas, saidas] = await Promise.all([
+    caminharSubarvore(sessao, OID_IF_DESCR),
+    caminharSubarvore(sessao, OID_IF_TYPE).catch(() => []),
+    caminharSubarvore(sessao, OID_IF_OPER_STATUS).catch(() => []),
+    caminharSubarvore(sessao, OID_IF_IN_OCTETS).catch(() => []),
+    caminharSubarvore(sessao, OID_IF_OUT_OCTETS).catch(() => []),
+  ]);
+
+  const porIndice = (varbinds: any[]) => {
+    const mapa = new Map<number, any>();
+    for (const vb of varbinds) {
+      if (snmp.isVarbindError(vb)) continue;
+      const partes = String(vb.oid).split(".");
+      mapa.set(Number(partes[partes.length - 1]), vb.value);
+    }
+    return mapa;
+  };
+  const mapaDescr = porIndice(descrs);
+  const mapaTipo = porIndice(tipos);
+  const mapaStatus = porIndice(status);
+  const mapaEntrada = porIndice(entradas);
+  const mapaSaida = porIndice(saidas);
+
+  const paraBigInt = (v: any) => {
+    try {
+      return v === undefined || v === null ? BigInt(0) : BigInt(v.toString());
+    } catch {
+      return BigInt(0);
+    }
+  };
+
+  const interfaces: InterfaceRede[] = Array.from(mapaDescr.entries()).map(([indice, descr]) => ({
+    indice,
+    nome: Buffer.isBuffer(descr) ? descr.toString("utf8").replace(/\0/g, "") : String(descr),
+    tipo: mapaTipo.has(indice) ? Number(mapaTipo.get(indice)) : null,
+    up: Number(mapaStatus.get(indice)) === IF_OPER_STATUS_UP,
+    trafegoTotal: paraBigInt(mapaEntrada.get(indice)) + paraBigInt(mapaSaida.get(indice)),
+  }));
+
+  const candidatas = interfaces.filter((i) => !ehLoopback(i));
+  if (candidatas.length === 0) {
+    const nomes = interfaces.map((i) => i.nome).join(", ") || "nenhuma";
+    throw new Error(`SNMP respondeu, mas nenhuma interface de rede (fora o loopback) foi encontrada em ifDescr (interfaces: ${nomes}).`);
+  }
+
+  const pesoNome = (nome: string) => (/^eth0$/i.test(nome) ? 2 : /^(eth|en|bond)/i.test(nome) ? 1 : 0);
+  candidatas.sort((a, b) => {
+    if (a.up !== b.up) return a.up ? -1 : 1;
+    if (a.trafegoTotal !== b.trafegoTotal) return a.trafegoTotal > b.trafegoTotal ? -1 : 1;
+    return pesoNome(b.nome) - pesoNome(a.nome);
+  });
+
+  return { indice: candidatas[0].indice, nome: candidatas[0].nome };
 }
 
 function lerContadores(sessao: snmp.Session, oidsEntradaSaida: [string, string]): Promise<[bigint, bigint]> {
@@ -135,26 +238,55 @@ function lerContadores(sessao: snmp.Session, oidsEntradaSaida: [string, string])
   });
 }
 
+function ehErroTimeoutSnmp(erro: unknown): boolean {
+  const e = erro as any;
+  return e?.name === "RequestTimedOutError" || /timed? ?out/i.test(String(e?.message ?? e));
+}
+
+/** Primeira amostra dos contadores: tenta 64 bits e cai para 32 bits se o agente nao suportar. */
+async function lerPrimeiraAmostra(
+  sessao: snmp.Session,
+  idx: number
+): Promise<{ amostra: [bigint, bigint]; oids: [string, string]; usar64Bits: boolean }> {
+  const oids64: [string, string] = [`${OID_IF_HC_IN_OCTETS}.${idx}`, `${OID_IF_HC_OUT_OCTETS}.${idx}`];
+  try {
+    return { amostra: await lerContadores(sessao, oids64), oids: oids64, usar64Bits: true };
+  } catch (e) {
+    // Timeout nao e "64 bits nao suportado" -- nao adianta tentar de novo com 32 bits
+    if (ehErroTimeoutSnmp(e)) throw e;
+    const oids32: [string, string] = [`${OID_IF_IN_OCTETS}.${idx}`, `${OID_IF_OUT_OCTETS}.${idx}`];
+    return { amostra: await lerContadores(sessao, oids32), oids: oids32, usar64Bits: false };
+  }
+}
+
 export async function obterConsumoRede(
   gravador: Gravador,
   intervaloAmostraMs = 1000
-): Promise<{ entradaMbps: number; saidaMbps: number }> {
+): Promise<{ entradaMbps: number; saidaMbps: number; interfaceNome: string }> {
   const sessao = criarSessaoSnmp(gravador);
 
   try {
-    const idx = INDICE_INTERFACE_PADRAO;
-    let usar64Bits = true;
-    let oidsEntradaSaida: [string, string] = [`${OID_IF_HC_IN_OCTETS}.${idx}`, `${OID_IF_HC_OUT_OCTETS}.${idx}`];
-
-    let amostra1: [bigint, bigint];
-    try {
-      amostra1 = await lerContadores(sessao, oidsEntradaSaida);
-    } catch {
-      // Fallback para contadores de 32 bits se os de 64 nao forem suportados
-      usar64Bits = false;
-      oidsEntradaSaida = [`${OID_IF_IN_OCTETS}.${idx}`, `${OID_IF_OUT_OCTETS}.${idx}`];
-      amostra1 = await lerContadores(sessao, oidsEntradaSaida);
+    // Usa a interface em cache; se nao houver (ou se o indice sumiu, ex.
+    // apos reboot/troca de firmware), descobre de novo via ifDescr.
+    let iface = gravador.snmpInterface;
+    let usouCache = !!iface;
+    if (!iface) {
+      iface = await descobrirInterfaceRede(sessao);
+      await atualizarInterfaceSnmpGravador(gravador.id, iface).catch(() => undefined);
     }
+
+    let primeira: Awaited<ReturnType<typeof lerPrimeiraAmostra>>;
+    try {
+      primeira = await lerPrimeiraAmostra(sessao, iface.indice);
+    } catch (e) {
+      if (!usouCache || ehErroTimeoutSnmp(e)) throw e;
+      // indice em cache nao existe mais (noSuchInstance) -- redescobre uma vez
+      iface = await descobrirInterfaceRede(sessao);
+      await atualizarInterfaceSnmpGravador(gravador.id, iface).catch(() => undefined);
+      usouCache = false;
+      primeira = await lerPrimeiraAmostra(sessao, iface.indice);
+    }
+    const { amostra: amostra1, oids: oidsEntradaSaida, usar64Bits } = primeira;
 
     await new Promise((r) => setTimeout(r, intervaloAmostraMs));
 
@@ -171,7 +303,10 @@ export async function obterConsumoRede(
     return {
       entradaMbps: Math.round(entradaMbps * 100) / 100,
       saidaMbps: Math.round(saidaMbps * 100) / 100,
+      interfaceNome: iface.nome,
     };
+  } catch (e) {
+    throw traduzirErroSnmp(e, gravador);
   } finally {
     sessao.close();
   }
@@ -245,6 +380,8 @@ export async function obterStatusDiscosSnmp(gravador: Gravador): Promise<DiscoGr
     }
 
     return discos;
+  } catch (e) {
+    throw traduzirErroSnmp(e, gravador);
   } finally {
     sessao.close();
   }
@@ -326,6 +463,7 @@ export async function coletarSaudeGravador(gravador: Gravador): Promise<SaudeGra
       const rede = await obterConsumoRede(gravador);
       resultado.redeEntradaMbps = rede.entradaMbps;
       resultado.redeSaidaMbps = rede.saidaMbps;
+      resultado.redeInterface = rede.interfaceNome;
     } catch (e: any) {
       resultado.erroRede = e.message || String(e);
     }
